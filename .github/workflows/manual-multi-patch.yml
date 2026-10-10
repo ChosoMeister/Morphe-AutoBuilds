@@ -1,0 +1,222 @@
+name: Manual Patch and Update
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+on:
+  workflow_dispatch:
+    inputs:
+      app_name:
+        description: 'App to build, or all four supported apps'
+        required: true
+        type: choice
+        options:
+          - all
+          - youtube
+          - youtube-music
+          - instagram
+          - google-photos
+        default: 'all'
+      source:
+        description: 'Source name (used only when building one app)'
+        required: false
+        type: string
+        default: ''
+      version:
+        description: 'Specific version (leave empty for latest)'
+        required: false
+        type: string
+        default: ''
+      replace_in_release:
+        description: 'Replace APK in existing release'
+        required: true
+        type: boolean
+        default: true
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.matrix.outputs.matrix }}
+    steps:
+      - name: Prepare app matrix
+        id: matrix
+        env:
+          APP_SELECTION: ${{ inputs.app_name }}
+          SOURCE_OVERRIDE: ${{ inputs.source }}
+        run: |
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import json, os
+          selection = os.environ["APP_SELECTION"]
+          override = os.environ["SOURCE_OVERRIDE"].strip()
+          defaults = {
+              "youtube": ("morphe", "universal"),
+              "youtube-music": ("morphe", "arm64-v8a"),
+              "instagram": ("piko", "universal"),
+              "google-photos": ("akash-photos", "universal"),
+          }
+          if selection == "all":
+              apps = list(defaults)
+          elif selection in defaults:
+              apps = [selection]
+          else:
+              raise SystemExit(f"Unsupported app: {selection}")
+          matrix = {"include": [
+              {"app_name": app, "source": override or defaults[app][0], "architecture": defaults[app][1]}
+              for app in apps
+          ]}
+          print("matrix=" + json.dumps(matrix))
+          PY
+
+  manual-patch:
+    needs: prepare
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.prepare.outputs.matrix) }}
+    runs-on: ubuntu-latest
+    services:
+      flaresolverr:
+        image: ghcr.io/flaresolverr/flaresolverr:latest
+        ports:
+          - 8192:8191
+        options: --shm-size=1gb
+    permissions:
+      contents: write
+    
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+      
+      - name: Set Specific Version (if provided)
+        if: ${{ inputs.version != '' }}
+        env:
+          APP_NAME: ${{ matrix.app_name }}
+          APP_VERSION: ${{ inputs.version }}
+        run: |
+          # Update only this matrix job's app config.
+          for dir in apps/apkmirror apps/apkpure apps/uptodown; do
+            config_file="$dir/$APP_NAME.json"
+            if [ -f "$config_file" ]; then
+              echo "Updating $config_file with version $APP_VERSION"
+              CONFIG_FILE="$config_file" python3 -c 'import json, os; p=os.environ["CONFIG_FILE"]; c=json.load(open(p)); c["version"]=os.environ["APP_VERSION"]; json.dump(c, open(p, "w"), indent=2)'
+              echo "Updated: $config_file"
+              break
+            fi
+          done
+      
+      - name: Install Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: 3.11
+      
+      - name: Install Dependencies
+        run: |
+          pip install -r requirements.txt
+          pip install requests beautifulsoup4
+      
+      - name: Setup Java 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '21'
+      
+      - name: Wait for FlareSolverr
+        run: |
+          echo "Waiting for FlareSolverr to be ready..."
+          for i in $(seq 1 30); do
+            if curl -s http://localhost:8192/ > /dev/null 2>&1; then
+              echo "FlareSolverr is ready."
+              break
+            fi
+            echo "Waiting... ($i/30)"
+            sleep 5
+          done
+
+      - name: Build APK
+        env:
+          APP_NAME: ${{ matrix.app_name }}
+          SOURCE: ${{ matrix.source }}
+          ARCH: ${{ matrix.architecture }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          FLARESOLVERR_URL: http://localhost:8192/v1
+        run: |
+          echo "🔧 Building ${{ matrix.app_name }} with ${{ matrix.source }} for ${{ matrix.architecture }} architecture..."
+          python -m src
+      
+      - name: Find Built APK
+        id: find-apk
+        run: |
+          # Find the built APK file(s)
+          apk_files=$(ls -1 *.apk 2>/dev/null)
+          if [ -z "$apk_files" ]; then
+            echo "❌ No APK files found"
+            exit 1
+          fi
+          
+          # Fix for multi-line output in GitHub Actions
+          {
+            echo "apk_files<<EOF"
+            echo "$apk_files"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+          
+          echo "apk_count=$(echo "$apk_files" | wc -l)" >> "$GITHUB_OUTPUT"
+          
+          # Print for debugging
+          echo "Found these APKs:"
+          echo "$apk_files"
+      
+      - name: Upload as Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: manual-apk-${{ matrix.app_name }}-${{ matrix.architecture }}
+          path: "*.apk"
+      
+      - name: Cleanup Version Override
+        if: ${{ inputs.version != '' && always() }}
+        env:
+          APP_NAME: ${{ matrix.app_name }}
+        run: |
+          # Reset only this matrix job's version override.
+          for dir in apps/apkmirror apps/apkpure apps/uptodown; do
+            config_file="$dir/$APP_NAME.json"
+            if [ -f "$config_file" ]; then
+              echo "Resetting version in $config_file"
+              CONFIG_FILE="$config_file" python3 -c 'import json, os; p=os.environ["CONFIG_FILE"]; c=json.load(open(p)); c["version"]=""; json.dump(c, open(p, "w"), indent=2)'
+            fi
+          done
+
+  publish:
+    if: ${{ inputs.replace_in_release == true }}
+    needs: manual-patch
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Download all APK artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: manual-apk-*
+          path: release-apks
+          merge-multiple: true
+
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Install Publisher Dependencies
+        run: pip install requests
+
+      - name: Publish all APKs to GitLab Releases
+        env:
+          GITLAB_TOKEN: ${{ secrets.GITLAB_TOKEN }}
+          GITLAB_PROJECT_ID: "87288318"
+        run: |
+          if [ -z "$GITLAB_TOKEN" ]; then
+            echo "GITLAB_TOKEN secret is not set on this repo."
+            exit 1
+          fi
+          python scripts/gitlab_publish_release.py \
+            --apks-dir ./release-apks \
+            --merge
+          count=$(find ./release-apks -maxdepth 1 -type f -name '*.apk' | wc -l)
+          echo "Published $count APK(s) to the release."
