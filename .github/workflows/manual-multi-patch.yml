@@ -1,4 +1,4 @@
-name: Manual Patch and Update
+name: Manual Multi Patch and Update
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
@@ -191,7 +191,7 @@ jobs:
     needs: manual-patch
     runs-on: ubuntu-latest
     permissions:
-      contents: read
+      contents: write
     steps:
       - name: Download all APK artifacts
         uses: actions/download-artifact@v4
@@ -200,23 +200,33 @@ jobs:
           path: release-apks
           merge-multiple: true
 
-      - name: Checkout Repository
-        uses: actions/checkout@v4
-
-      - name: Install Publisher Dependencies
-        run: pip install requests
-
-      - name: Publish all APKs to GitLab Releases
+      - name: Publish APKs to GitHub Release
         env:
-          GITLAB_TOKEN: ${{ secrets.GITLAB_TOKEN }}
-          GITLAB_PROJECT_ID: "87288318"
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          RUN_NUMBER: ${{ github.run_number }}
         run: |
-          if [ -z "$GITLAB_TOKEN" ]; then
-            echo "GITLAB_TOKEN secret is not set on this repo."
+          set -euo pipefail
+          shopt -s nullglob
+          apks=(release-apks/*.apk)
+          if [ ${#apks[@]} -eq 0 ]; then
+            echo "No APK files found under release-apks."
+            find release-apks -maxdepth 3 -type f -print || true
             exit 1
           fi
-          python scripts/gitlab_publish_release.py \
-            --apks-dir ./release-apks \
-            --merge
-          count=$(find ./release-apks -maxdepth 1 -type f -name '*.apk' | wc -l)
-          echo "Published $count APK(s) to the release."
+          echo "Found ${#apks[@]} APK(s):"
+          printf ' - %s\n' "${apks[@]}"
+
+          tag="manual-build-${RUN_NUMBER}"
+          title="Morphe APKs - Manual build #${RUN_NUMBER}"
+          if gh release view latest --repo "$REPO" >/dev/null 2>&1; then
+            gh release upload latest "${apks[@]}" --clobber --repo "$REPO"
+            echo "Uploaded ${#apks[@]} APK(s) to existing GitHub Release 'latest'."
+          else
+            gh release create latest "${apks[@]}" \
+              --repo "$REPO" \
+              --title "$title" \
+              --notes "APK builds from GitHub Actions run #${RUN_NUMBER}." \
+              --latest
+            echo "Created GitHub Release 'latest' with ${#apks[@]} APK(s)."
+          fi
