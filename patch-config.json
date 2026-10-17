@@ -22,7 +22,7 @@
     },
     {
       "app_name": "pinterest",
-      "source": "adobo"
+      "source": "hushpinterest"
     },
     {
       "app_name": "soundcloud",
@@ -242,7 +242,7 @@
     },
     {
       "app_name": "nova",
-      "source": "rushiranpise"
+      "source": "dropped"
     },
     {
       "app_name": "ticktick",
@@ -349,6 +349,10 @@
       "source": "rushiranpise-dev"
     },
     {
+      "app_name": "x",
+      "source": "piko"
+    },
+    {
       "app_name": "x-new",
       "source": "piko-newx"
     },
@@ -357,8 +361,16 @@
       "source": "jasonwu1994"
     },
     {
+      "app_name": "google-photos",
+      "source": "akash-sriram"
+    },
+    {
+      "app_name": "google-maps",
+      "source": "bearinmindcat"
+    },
+    {
       "app_name": "facebook",
-      "source": "devanced"
+      "source": "hushfacebook"
     }
   ]
 }
